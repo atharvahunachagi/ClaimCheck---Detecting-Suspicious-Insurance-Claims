@@ -25,7 +25,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .block-container {padding-top: 1.6rem; padding-bottom: 2.5rem;}
+    .block-container {padding-top: 1rem; padding-bottom: 2.5rem; max-width: 1500px;}
     [data-testid="stMetric"] {
         background: rgba(120, 130, 150, 0.08);
         border: 1px solid rgba(120, 130, 150, 0.20);
@@ -99,6 +99,39 @@ def load_preprocessor(path: str, modified_time: float):
     return joblib.load(path)
 
 
+@st.cache_resource
+def load_model_bundle(model_path, model_mtime, prep_path, prep_mtime):
+    prep = joblib.load(prep_path)
+    model = FraudMLP(input_dim=149)
+    model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+    model.eval()
+    return model, prep
+
+
+def feature_frame(frame):
+    return prepare_features(frame.drop(columns=[TARGET, "PolicyNumber"], errors="ignore"))
+
+
+@st.cache_data(show_spinner="Scoring claims with the trained model…")
+def score_dataset(data, model_mtime, prep_mtime):
+    model, prep = load_model_bundle(str(MODEL_PATH), model_mtime, str(PREPROCESSOR_PATH), prep_mtime)
+    x = np.asarray(prep.transform(feature_frame(data)), dtype=np.float32)
+    with torch.no_grad():
+        scores = torch.sigmoid(model(torch.tensor(x))).squeeze(1).numpy()
+    result = pd.DataFrame(index=data.index)
+    result["Model score"] = scores
+    result["Prediction"] = np.where(scores >= 0.5, "Potential fraud", "Likely legitimate")
+    result["Risk"] = np.select([scores >= 0.70, scores >= 0.35], ["High risk", "Medium risk"], default="Low risk")
+    return result
+
+
+def predict_one(frame):
+    model, prep = load_model_bundle(str(MODEL_PATH), MODEL_PATH.stat().st_mtime, str(PREPROCESSOR_PATH), PREPROCESSOR_PATH.stat().st_mtime)
+    x = np.asarray(prep.transform(feature_frame(frame)), dtype=np.float32)
+    with torch.no_grad():
+        return float(torch.sigmoid(model(torch.tensor(x))).item())
+
+
 def get_risk_band(probability: float) -> str:
     # Initial operating bands for the interface; tune against validation data
     # before using these for real-world claim decisions.
@@ -140,7 +173,7 @@ with st.sidebar:
     st.caption("Fraud detection workspace")
     page = st.radio(
         "Navigate",
-        ["Overview & Analytics", "Predict a Claim", "Claim Investigation", "Model Performance"],
+        ["Overview & Analytics", "Predict a Claim", "Fraud Risk Analysis", "Claim Investigation", "Model Performance"],
         label_visibility="visible",
     )
     st.divider()
@@ -159,119 +192,116 @@ fraud_count = int((historical == 1).sum())
 legit_count = int((historical == 0).sum())
 fraud_pct = (fraud_count / len(df) * 100) if len(df) else 0
 
+predictions = None
+prediction_error = None
+if assets_ready:
+    try:
+        predictions = score_dataset(df, MODEL_PATH.stat().st_mtime, PREPROCESSOR_PATH.stat().st_mtime)
+    except Exception as exc:
+        prediction_error = str(exc)
+
 if page == "Overview & Analytics":
-    st.subheader("Dashboard overview")
-    st.caption("Dataset statistics below are calculated from the repository CSV. Prediction KPIs remain unavailable until the trained model artifacts are added.")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Claims in dataset", f"{len(df):,}")
-    c2.metric("High-risk predictions", "—", help="Requires the saved model and preprocessor.")
-    c3.metric("Low-risk predictions", "—", help="Requires the saved model and preprocessor.")
-    c4.metric("Model status", "Ready" if assets_ready else "Not connected")
-
-    st.info(
-        f"Historical labels: {fraud_count:,} fraud-labelled claims ({fraud_pct:.2f}%) "
-        f"and {legit_count:,} legitimate-labelled claims. These are dataset labels, "
-        "not predictions made by the dashboard."
-    )
-
-    left, right = st.columns(2)
+    st.subheader("Overview & analytics")
+    st.caption("Historical claim data and model-generated screening results.")
+    if prediction_error:
+        st.error("The files exist, but the model could not score the dataset. The saved weights and preprocessor must come from the same training run.")
+        with st.expander("Technical details"): st.code(prediction_error)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Claims analyzed", f"{len(df):,}")
+    if predictions is not None:
+        high = int((predictions["Risk"] == "High risk").sum())
+        low = int((predictions["Risk"] == "Low risk").sum())
+        med = int((predictions["Risk"] == "Medium risk").sum())
+        k2.metric("High-risk claims", f"{high:,}")
+        k3.metric("Low-risk claims", f"{low:,}")
+        k4.metric("Model status", "Operational")
+        st.caption(f"{med:,} claims fall in the medium-risk band. Risk bands use uncalibrated model scores, not verified fraud probabilities.")
+    else:
+        k2.metric("High-risk claims", "—")
+        k3.metric("Low-risk claims", "—")
+        k4.metric("Model status", "Not connected" if not assets_ready else "Inference error")
+    left, right = st.columns(2, gap="large")
     with left:
-        st.markdown("#### Historical label distribution")
-        label_data = pd.DataFrame({
-            "Label": ["Legitimate", "Fraudulent"],
-            "Claims": [legit_count, fraud_count],
-        }).set_index("Label")
-        st.bar_chart(label_data)
+        st.markdown("#### Historical labels")
+        st.bar_chart(pd.DataFrame({"Claims": [legit_count, fraud_count]}, index=["Legitimate", "Fraud-labelled"]), horizontal=True)
+        st.caption(f"{fraud_pct:.2f}% of source records have a fraud label. This is ground-truth data, not a model prediction.")
     with right:
+        st.markdown("#### Model risk distribution")
+        if predictions is not None:
+            st.bar_chart(predictions["Risk"].value_counts().reindex(["High risk", "Medium risk", "Low risk"], fill_value=0), horizontal=True)
+        else:
+            st.info("Risk distribution appears after model inference succeeds.")
+    left, right = st.columns(2, gap="large")
+    with left:
         st.markdown("#### Claims by vehicle make")
-        if "Make" in df.columns:
-            make_counts = df["Make"].fillna("Unknown").value_counts().head(12)
-            st.bar_chart(make_counts)
-        else:
-            st.write("Vehicle make is not available in this dataset.")
-
-    left, right = st.columns(2)
-    with left:
-        st.markdown("#### Historical fraud labels by accident area")
-        if "AccidentArea" in df.columns:
-            area = pd.crosstab(df["AccidentArea"].fillna("Unknown"), historical)
-            area = area.rename(columns={0: "Legitimate label", 1: "Fraud label"})
-            st.bar_chart(area)
-        else:
-            st.write("Accident-area field is not available.")
+        if "Make" in df.columns: st.bar_chart(df["Make"].fillna("Unknown").value_counts().head(10), horizontal=True)
     with right:
-        st.markdown("#### Dataset preview")
-        st.dataframe(df.head(10), use_container_width=True, hide_index=True)
-
-    st.caption("Historical labels describe the source dataset. They must not be presented as model-generated risk predictions.")
+        st.markdown("#### Historical labels by accident area")
+        if "AccidentArea" in df.columns:
+            st.bar_chart(pd.crosstab(df["AccidentArea"].fillna("Unknown"), historical).rename(columns={0:"Legitimate",1:"Fraud-labelled"}))
+    st.markdown("#### High-risk review queue")
+    if predictions is not None:
+        queue = df.loc[predictions.index[predictions["Risk"] == "High risk"]].copy()
+        queue.insert(0, "Claim ID", [f"CL-{i+1:05d}" for i in queue.index])
+        queue["Risk"] = predictions.loc[queue.index, "Risk"]
+        queue["Model score"] = (predictions.loc[queue.index, "Model score"] * 100).round(1)
+        cols = ["Claim ID", "Risk", "Model score"] + [c for c in ["Make", "AccidentArea", "Fault", "VehiclePrice", "AgeOfVehicle"] if c in queue.columns]
+        st.dataframe(queue[cols].head(10), use_container_width=True, hide_index=True)
+    st.markdown("#### Dataset preview")
+    st.dataframe(df.head(8), use_container_width=True, hide_index=True)
 
 elif page == "Predict a Claim":
-    st.subheader("Predict fraud risk for a claim")
-    st.write("Enter the claim and policy information. The form uses the feature fields available in the training dataset.")
-
-    if not assets_ready:
-        st.warning(
-            "Live prediction is currently unavailable because the repository does not contain both "
-            "'fraud_mlp.pt' and 'preprocessor.pkl'. The form can be reviewed, but no placeholder "
-            "or fabricated prediction will be shown."
-        )
-
+    st.subheader("Assess a new claim")
+    st.caption("Complete the fields below to obtain a model-assisted screening score.")
     feature_columns = [c for c in df.columns if c not in [TARGET, "PolicyNumber"]]
     with st.form("claim_prediction_form"):
-        st.markdown("##### Claim details")
         values = {}
-        columns = st.columns(3)
+        cols = st.columns(3)
         for idx, col in enumerate(feature_columns):
             series = df[col]
-            with columns[idx % 3]:
+            with cols[idx % 3]:
                 if pd.api.types.is_numeric_dtype(series):
-                    median = pd.to_numeric(series, errors="coerce").median()
-                    default = float(median) if pd.notna(median) else 0.0
-                    values[col] = st.number_input(
-                        col, value=default, key=f"claim_{col}"
-                    )
+                    nums = pd.to_numeric(series, errors="coerce")
+                    values[col] = st.number_input(col, value=float(nums.median()) if nums.notna().any() else 0.0, key=f"claim_{col}")
                 else:
-                    choices = series.dropna().astype(str).value_counts().index.tolist()
-                    if not choices:
-                        choices = ["Unknown"]
+                    choices = series.dropna().astype(str).value_counts().index.tolist() or ["Unknown"]
                     values[col] = st.selectbox(col, choices, key=f"claim_{col}")
-        submitted = st.form_submit_button("Analyze claim", type="primary", use_container_width=True)
-
+        submitted = st.form_submit_button("Run assessment", type="primary", use_container_width=True)
     if submitted:
-        if not assets_ready:
-            st.error("Prediction not run: add the trained model and preprocessor artifacts first.")
+        if not assets_ready: st.error("Add fraud_mlp.pt and preprocessor.pkl to enable prediction.")
         else:
             try:
-                input_frame = pd.DataFrame([values])
-                input_frame = prepare_features(input_frame)
-                preprocessor = load_preprocessor(
-                    str(PREPROCESSOR_PATH), PREPROCESSOR_PATH.stat().st_mtime
-                )
-                transformed = preprocessor.transform(input_frame)
-                transformed = np.asarray(transformed, dtype=np.float32)
-                model = FraudMLP(input_dim=transformed.shape[1])
-                state = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
-                model.load_state_dict(state)
-                model.eval()
-                with torch.no_grad():
-                    logits = model(torch.tensor(transformed, dtype=torch.float32))
-                    probability = float(torch.sigmoid(logits).item())
-
-                band = get_risk_band(probability)
-                score = round(probability * 100)
-                a, b, c = st.columns(3)
-                a.metric("Predicted class", "Potential fraud" if probability >= 0.5 else "Likely legitimate")
-                b.metric("Model score", f"{score}/100")
-                c.metric("Risk band", band)
-                st.progress(min(max(probability, 0.0), 1.0))
-                st.warning(
-                    "This is a model score, not a calibrated probability or proof of fraud. "
-                    "Review the claim and supporting evidence before making a decision."
-                )
+                score = predict_one(pd.DataFrame([values]))
+                a,b,c = st.columns(3)
+                a.metric("Screening score", f"{score*100:.1f}/100")
+                b.metric("Risk band", get_risk_band(score))
+                c.metric("Predicted class", "Potential fraud" if score >= 0.5 else "Likely legitimate")
+                st.progress(min(max(score,0.0),1.0))
+                st.warning("This is an uncalibrated screening score, not proof of fraud. A human investigator should review the evidence.")
             except Exception as exc:
-                st.error("Prediction failed. The saved model, preprocessor, and feature engineering must match the notebook.")
+                st.error("Inference failed. Confirm the model weights, preprocessor and feature engineering match.")
                 st.exception(exc)
+
+elif page == "Fraud Risk Analysis":
+    st.subheader("Fraud risk analysis")
+    if predictions is None:
+        st.error("Model inference is unavailable.")
+        if prediction_error: st.code(prediction_error)
+    else:
+        a,b,c = st.columns(3)
+        a.metric("High risk", f"{int((predictions['Risk']=='High risk').sum()):,}")
+        b.metric("Medium risk", f"{int((predictions['Risk']=='Medium risk').sum()):,}")
+        c.metric("Low risk", f"{int((predictions['Risk']=='Low risk').sum()):,}")
+        st.markdown("#### Model score distribution")
+        st.line_chart(predictions["Model score"].reset_index(drop=True).rename("Raw sigmoid score"))
+        st.caption("Scores are not calibrated probabilities. This dashboard does not yet compute per-claim SHAP explanations.")
+        band = st.selectbox("Filter by risk band", ["All", "High risk", "Medium risk", "Low risk"])
+        view = df.copy()
+        view["Prediction"] = predictions["Prediction"]
+        view["Risk"] = predictions["Risk"]
+        view["Model score"] = (predictions["Model score"]*100).round(1)
+        if band != "All": view = view[view["Risk"] == band]
+        st.dataframe(view.sort_values("Model score", ascending=False).head(100), use_container_width=True, hide_index=True)
 
 elif page == "Claim Investigation":
     st.subheader("Claim investigation")
