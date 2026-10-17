@@ -192,17 +192,26 @@ fraud_count = int((historical == 1).sum())
 legit_count = int((historical == 0).sum())
 fraud_pct = (fraud_count / len(df) * 100) if len(df) else 0
 
-predictions = None
-prediction_error = None
-if assets_ready:
-    try:
-        predictions = score_dataset(df, MODEL_PATH.stat().st_mtime, PREPROCESSOR_PATH.stat().st_mtime)
-    except Exception as exc:
-        prediction_error = str(exc)
+# Avoid expensive full-dataset inference during the initial page render.
+predictions = st.session_state.get("claimcheck_predictions")
+prediction_error = st.session_state.get("claimcheck_prediction_error")
 
 if page == "Overview & Analytics":
     st.subheader("Overview & analytics")
     st.caption("Historical claim data and model-generated screening results.")
+    if assets_ready and predictions is None:
+        if st.button("Run model on all 15,420 claims", type="primary"):
+            try:
+                with st.spinner("Loading model and scoring claims. First run may take a little while…"):
+                    st.session_state["claimcheck_predictions"] = score_dataset(
+                        df, MODEL_PATH.stat().st_mtime, PREPROCESSOR_PATH.stat().st_mtime
+                    )
+                    st.session_state["claimcheck_prediction_error"] = None
+                st.rerun()
+            except Exception as exc:
+                st.session_state["claimcheck_prediction_error"] = str(exc)
+                st.rerun()
+        st.caption("Charts load without inference. Run scoring when you want model-generated risk counts.")
     if prediction_error:
         st.error("The files exist, but the model could not score the dataset. The saved weights and preprocessor must come from the same training run.")
         with st.expander("Technical details"): st.code(prediction_error)
@@ -284,6 +293,18 @@ elif page == "Predict a Claim":
 
 elif page == "Fraud Risk Analysis":
     st.subheader("Fraud risk analysis")
+    if assets_ready and predictions is None:
+        if st.button("Run model on all claims", type="primary"):
+            try:
+                with st.spinner("Scoring claims…"):
+                    st.session_state["claimcheck_predictions"] = score_dataset(
+                        df, MODEL_PATH.stat().st_mtime, PREPROCESSOR_PATH.stat().st_mtime
+                    )
+                    st.session_state["claimcheck_prediction_error"] = None
+                st.rerun()
+            except Exception as exc:
+                st.session_state["claimcheck_prediction_error"] = str(exc)
+                st.rerun()
     if predictions is None:
         st.error("Model inference is unavailable.")
         if prediction_error: st.code(prediction_error)
