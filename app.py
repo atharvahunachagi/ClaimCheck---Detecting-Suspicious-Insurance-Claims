@@ -304,29 +304,45 @@ elif page == "Fraud Risk Analysis":
         st.dataframe(view.sort_values("Model score", ascending=False).head(100), use_container_width=True, hide_index=True)
 
 elif page == "Claim Investigation":
-    st.subheader("Claim investigation")
-    st.caption("Browse the historical dataset and its recorded labels. Model predictions will appear here once prediction logging is implemented.")
-    search = st.text_input("Search claims", placeholder="Search any visible field...")
-    label_filter = st.selectbox("Historical label filter", ["All labels", "Fraud-labelled", "Legitimate-labelled"])
+    st.subheader("Claim investigation workspace")
+    st.caption("Search and review records alongside historical labels and model screening results.")
     view = df.copy()
+    view.insert(0, "Claim ID", [f"CL-{i+1:05d}" for i in range(len(df))])
     view["Historical label"] = np.where(historical == 1, "Fraud-labelled", "Legitimate-labelled")
+    if predictions is not None:
+        view["Model score"] = (predictions["Model score"] * 100).round(1)
+        view["Prediction"] = predictions["Prediction"]
+        view["Risk"] = predictions["Risk"]
+    left, right = st.columns([1.4, 1])
+    with left:
+        search = st.text_input("Search claims", placeholder="Claim ID, vehicle make, accident area…")
+    with right:
+        risk_options = ["All risks", "High risk", "Medium risk", "Low risk"] if predictions is not None else ["All risks"]
+        risk_filter = st.selectbox("Risk band", risk_options)
+    label_filter = st.selectbox("Historical label", ["All labels", "Fraud-labelled", "Legitimate-labelled"])
+    if risk_filter != "All risks" and "Risk" in view:
+        view = view[view["Risk"] == risk_filter]
     if label_filter != "All labels":
         view = view[view["Historical label"] == label_filter]
     if search.strip():
-        searchable = view.astype(str).apply(
-            lambda col: col.str.contains(search.strip(), case=False, na=False)
-        ).any(axis=1)
-        view = view[searchable]
-    st.write(f"Showing {len(view):,} records")
-    st.dataframe(view, use_container_width=True, hide_index=True)
-    st.download_button(
-        "Download filtered claims as CSV",
-        data=view.to_csv(index=False).encode("utf-8"),
-        file_name="claimcheck_filtered_claims.csv",
-        mime="text/csv",
-    )
-    st.caption("The source file does not provide a verified claim ID for every record, so the dashboard does not invent one.")
-
+        mask = view.astype(str).apply(lambda col: col.str.contains(search.strip(), case=False, na=False)).any(axis=1)
+        view = view[mask]
+    sort_options = ["Claim ID"] + (["Model score", "Risk"] if predictions is not None else [])
+    sort_by = st.selectbox("Sort records by", sort_options)
+    view = view.sort_values(sort_by, ascending=(sort_by == "Claim ID"))
+    st.caption(f"{len(view):,} matching records · showing up to 500")
+    st.dataframe(view.head(500), use_container_width=True, hide_index=True)
+    st.download_button("Download filtered claims", view.to_csv(index=False).encode("utf-8"), "claimcheck_investigation.csv", "text/csv")
+    if len(view):
+        selected = st.selectbox("Open record details", view["Claim ID"].tolist())
+        record = view.loc[view["Claim ID"] == selected].iloc[0]
+        with st.expander(f"Record details · {selected}", expanded=True):
+            if predictions is not None:
+                a, b, c = st.columns(3)
+                a.metric("Model score", f"{record['Model score']:.1f}/100")
+                b.metric("Risk band", str(record["Risk"]))
+                c.metric("Historical label", str(record["Historical label"]))
+            st.json(record.drop(labels=[c for c in ["Claim ID", "Model score", "Prediction", "Risk", "Historical label"] if c in record.index]).to_dict())
 elif page == "Model Performance":
     st.subheader("Model performance")
     st.write("These are the evaluation results recorded in the current notebook output. Re-run the notebook to refresh them after any training changes.")
