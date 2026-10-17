@@ -1,5 +1,6 @@
 streamlit
-torch
 pandas
+numpy
 scikit-learn
+torch
 joblib
