@@ -301,14 +301,13 @@ elif page == "Model Performance":
     st.subheader("Model performance")
     st.write("These are the evaluation results recorded in the current notebook output. Re-run the notebook to refresh them after any training changes.")
     metrics = pd.DataFrame([
-        {"Model": "Random Forest", "ROC-AUC": 0.8166, "Fraud precision": 1.00, "Fraud recall": 0.01, "Fraud F1": 0.01},
-        {"Model": "Baseline XGBoost", "ROC-AUC": 0.8219, "Fraud precision": 0.19, "Fraud recall": 0.33, "Fraud F1": 0.24},
-        {"Model": "PyTorch MLP", "ROC-AUC": 0.8310, "Fraud precision": 0.16, "Fraud recall": 0.70, "Fraud F1": 0.26},
+        {"Model": "Random Forest", "ROC-AUC": 0.8166, "Fraud recall": 0.01},
+        {"Model": "Baseline XGBoost", "ROC-AUC": 0.8219, "Fraud recall": 0.33},
+        {"Model": "PyTorch MLP", "ROC-AUC": 0.8310, "Fraud recall": 0.70},
     ])
     st.dataframe(
         metrics.style.format({
-            "ROC-AUC": "{:.4f}", "Fraud precision": "{:.2%}",
-            "Fraud recall": "{:.2%}", "Fraud F1": "{:.2%}",
+            "ROC-AUC": "{:.4f}", "Fraud recall": "{:.2%}",
         }),
         use_container_width=True,
         hide_index=True,
